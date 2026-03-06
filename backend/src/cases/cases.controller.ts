@@ -3,6 +3,8 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import { CasesService } from './cases.service';
 import { CaseJudgeService } from './case-judge.service';
+import { FreezeService } from './freeze.service';
+import { RecoveryHistoryService } from './recovery-history.service';
 
 @ApiTags('案件管理')
 @Controller('cases')
@@ -11,6 +13,8 @@ export class CasesController {
   constructor(
     private casesService: CasesService,
     private caseJudgeService: CaseJudgeService,
+    private freezeService: FreezeService,
+    private recoveryHistoryService: RecoveryHistoryService,
   ) {}
 
   @Get()
@@ -84,5 +88,150 @@ export class CasesController {
     // 通过法院名称查找法院ID
     // 这里简化处理，实际应该通过courtId关联
     return { primaryJudges: [], assistants: [], clerks: [] };
+  }
+
+  // ========== 冻结管理 ==========
+
+  @Put(':id/freeze/no-freeze')
+  @ApiOperation({ summary: '标记无需冻结' })
+  async markNoFreeze(
+    @Param('id') id: string,
+    @Body('reason') reason: string,
+    @Body('operator') operator: string,
+  ) {
+    const result = await this.freezeService.markNoFreeze(
+      id,
+      reason || '已协商无需冻结',
+      operator || 'system',
+    );
+    return {
+      success: true,
+      data: result,
+      message: '已标记为无需冻结',
+    };
+  }
+
+  @Put(':id/freeze/frozen')
+  @ApiOperation({ summary: '标记已冻结' })
+  async markFrozen(
+    @Param('id') id: string,
+    @Body('freezeAmount') freezeAmount: number,
+    @Body('freezeDate') freezeDate: Date,
+    @Body('operator') operator: string,
+  ) {
+    const result = await this.freezeService.markFrozen(
+      id,
+      freezeAmount,
+      freezeDate || new Date(),
+      operator || 'system',
+    );
+    return {
+      success: true,
+      data: result,
+      message: '已标记为已冻结',
+    };
+  }
+
+  @Put(':id/freeze/unfreeze')
+  @ApiOperation({ summary: '解冻案件' })
+  async unfreeze(
+    @Param('id') id: string,
+    @Body('unfreezeDate') unfreezeDate: Date,
+    @Body('operator') operator: string,
+  ) {
+    const result = await this.freezeService.unfreeze(
+      id,
+      unfreezeDate || new Date(),
+      operator || 'system',
+    );
+    return {
+      success: true,
+      data: result,
+      message: '案件已解冻',
+    };
+  }
+
+  @Put(':id/freeze/actual-amount')
+  @ApiOperation({ summary: '更新实际冻结金额' })
+  async updateActualFreezeAmount(
+    @Param('id') id: string,
+    @Body('actualAmount') actualAmount: number,
+    @Body('operator') operator: string,
+  ) {
+    const result = await this.freezeService.updateActualFreezeAmount(
+      id,
+      actualAmount,
+      operator || 'system',
+    );
+    return {
+      success: true,
+      data: result,
+      message: '实际冻结金额已更新',
+    };
+  }
+
+  @Get('freeze/no-freeze')
+  @ApiOperation({ summary: '获取无需冻结案件列表' })
+  async getNoFreezeCases() {
+    const list = await this.freezeService.getNoFreezeCases();
+    return {
+      success: true,
+      data: list,
+    };
+  }
+
+  @Get('freeze/frozen')
+  @ApiOperation({ summary: '获取已冻结案件列表' })
+  async getFrozenCases() {
+    const list = await this.freezeService.getFrozenCases();
+    return {
+      success: true,
+      data: list,
+    };
+  }
+
+  @Get(':id/freeze/check')
+  @ApiOperation({ summary: '检查案件是否需要冻结' })
+  async checkFreezeRequirement(@Param('id') id: string) {
+    const result = await this.freezeService.checkFreezeRequirement(id);
+    return {
+      success: true,
+      data: result,
+    };
+  }
+
+  // ========== 执恢历史 ==========
+
+  @Get(':id/recovery/history')
+  @ApiOperation({ summary: '获取执恢历史记录' })
+  async getRecoveryHistory(@Param('id') id: string) {
+    const history = await this.recoveryHistoryService.getRecoveryHistory(id);
+    return {
+      success: true,
+      data: history,
+    };
+  }
+
+  @Post(':id/recovery')
+  @ApiOperation({ summary: '创建执恢案件' })
+  async createRecoveryCase(
+    @Param('id') id: string,
+    @Body() data: {
+      recoveryCaseNo: string;
+      amount: number;
+      filingDate: Date;
+    },
+    @Body('operator') operator: string,
+  ) {
+    const result = await this.recoveryHistoryService.createRecoveryCase(
+      id,
+      data,
+      operator || 'system',
+    );
+    return {
+      success: true,
+      data: result,
+      message: '执恢案件已创建',
+    };
   }
 }
