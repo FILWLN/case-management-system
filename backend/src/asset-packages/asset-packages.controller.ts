@@ -3,7 +3,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { AssetPackagesService } from './asset-packages.service';
 
 @Controller('asset-packages')
-@UseGuards(AuthGuard('jwt'))
+// @UseGuards(AuthGuard('jwt'))  // 临时关闭认证
 export class AssetPackagesController {
   constructor(private assetPackagesService: AssetPackagesService) {}
 

@@ -9,7 +9,7 @@ import { SharedModule } from './shared/shared.module';
 @Module({
   imports: [
     TypeOrmModule.forRoot({
-      type: 'sqlite',
+      type: 'better-sqlite3',
       database: './data/case-management.db',
       entities: [__dirname + '/**/*.entity{.ts,.js}'],
       synchronize: true, // 开发环境使用，生产环境请关闭

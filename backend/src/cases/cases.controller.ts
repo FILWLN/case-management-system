@@ -3,7 +3,7 @@ import { AuthGuard } from '@nestjs/passport';
 import { CasesService } from './cases.service';
 
 @Controller('cases')
-@UseGuards(AuthGuard('jwt'))
+// @UseGuards(AuthGuard('jwt'))  // 临时关闭认证
 export class CasesController {
   constructor(private casesService: CasesService) {}
 

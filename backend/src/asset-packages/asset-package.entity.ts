@@ -59,6 +59,6 @@ export class AssetPackage {
   updatedAt: Date;
 
   // 关联案件
-  @OneToMany(() => Case, c => c.assetPackage)
+  @OneToMany(() => Case, c => c.id)
   cases: Case[];
 }

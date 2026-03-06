@@ -1,8 +1,17 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { RepaymentPlan } from '../cases/repayment-plan.entity';
-import { RepaymentInstallment } from '../cases/repayment-installment.entity';
+import { RepaymentInstallment } from '../../cases/repayment-installment.entity';
+
+interface RepaymentPlan {
+  caseId: number;
+  totalPeriods: number;
+  repaymentDay: number;
+  repaymentMethod: string;
+  firstDueDate: Date;
+  totalAmount: number;
+  interestRate?: number;
+}
 
 @Injectable()
 export class RepaymentPlanGeneratorService {
