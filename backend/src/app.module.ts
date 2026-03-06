@@ -7,6 +7,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { SharedModule } from './shared/shared.module';
 import { ImportModule } from './import/import.module';
 import { JudgesModule } from './judges/judges.module';
+import { ReportsModule } from './reports/reports.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { JudgesModule } from './judges/judges.module';
     NotificationsModule,
     ImportModule,
     JudgesModule,
+    ReportsModule,
   ],
 })
 export class AppModule {}
