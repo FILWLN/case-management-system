@@ -4,6 +4,7 @@ import { Case } from '../cases/case.entity';
 import { RepaymentInstallment } from '../cases/repayment-installment.entity';
 import { RepaymentImportService } from './repayment-import.service';
 import { CaseImportService } from './case-import.service';
+import { DataCleaningService } from './data-cleaning.service';
 import { ImportController } from './import.controller';
 
 @Module({
@@ -11,7 +12,7 @@ import { ImportController } from './import.controller';
     TypeOrmModule.forFeature([Case, RepaymentInstallment]),
   ],
   controllers: [ImportController],
-  providers: [RepaymentImportService, CaseImportService],
-  exports: [RepaymentImportService, CaseImportService],
+  providers: [RepaymentImportService, CaseImportService, DataCleaningService],
+  exports: [RepaymentImportService, CaseImportService, DataCleaningService],
 })
 export class ImportModule {}

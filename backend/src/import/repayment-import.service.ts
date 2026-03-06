@@ -4,33 +4,18 @@ import { Repository } from 'typeorm';
 import * as XLSX from 'xlsx';
 import { Case } from '../cases/case.entity';
 import { RepaymentInstallment } from '../cases/repayment-installment.entity';
+import { DataCleaningService } from './data-cleaning.service';
 
-// 还款记录接口
-export interface RepaymentRecord {
-  pinCode?: string;              // 京东PIN（从客户ID提取）
-  customerId: string;            // 客户ID
-  repaymentAmount: number;       // 还款金额
-  couponAmount?: number;         // 优惠券核销金额
-  repaymentDate: Date;           // 还款时间
-  repaymentMethod: string;       // 还款方式
-  repaymentType: 'voluntary' | 'court_deduction'; // 还款类型：主动还款/法院划扣
-  collector?: string;            // 催收员
-  collectionAgency?: string;     // 催收机构
-  remark?: string;               // 备注
-}
-
-// 导入结果
-export interface ImportResult {
-  total: number;                 // 总行数
-  success: number;               // 成功导入数
-  failed: number;                // 失败数
-  errors: Array<{
-    row: number;
-    message: string;
-    data: any;
-  }>;
-  importedRecords: RepaymentRecord[];
-}
+// 列映射配置（基于实际Excel列位置）
+const REPAYMENT_COLUMN_MAPPING: Record<string, string> = {
+  customerId: '客户ID',
+  repaymentAmount: '还款金额（元）',
+  couponAmount: '还款券核销金额（元）',
+  repaymentDate: '还款时间',
+  repaymentMethod: '还款方式',
+  collector: '催收员',
+  collectionAgency: '催收机构',
+};
 
 @Injectable()
 export class RepaymentImportService {
@@ -41,6 +26,7 @@ export class RepaymentImportService {
     private caseRepo: Repository<Case>,
     @InjectRepository(RepaymentInstallment)
     private installmentRepo: Repository<RepaymentInstallment>,
+    private cleaningService: DataCleaningService,
   ) {}
 
   /**
@@ -52,6 +38,7 @@ export class RepaymentImportService {
       const sheetName = workbook.SheetNames[0];
       const worksheet = workbook.Sheets[sheetName];
       const data = XLSX.utils.sheet_to_json(worksheet);
+      this.logger.log(`Excel解析完成，共 ${data.length} 行数据`);
       return data;
     } catch (error) {
       this.logger.error('Excel解析失败', error);
@@ -62,37 +49,66 @@ export class RepaymentImportService {
   /**
    * 导入还款数据
    */
-  async importRepayments(fileBuffer: Buffer, operator: string): Promise<ImportResult> {
+  async importRepayments(fileBuffer: Buffer, operator: string): Promise<{
+    total: number;
+    success: number;
+    failed: number;
+    errors: Array<{ row: number; message: string; data: any }>;
+  }> {
     const rawData = this.parseExcel(fileBuffer);
-    const result: ImportResult = {
+    const result = {
       total: rawData.length,
       success: 0,
       failed: 0,
-      errors: [],
-      importedRecords: [],
+      errors: [] as Array<{ row: number; message: string; data: any }>,
     };
 
     for (let i = 0; i < rawData.length; i++) {
       const row = rawData[i];
-      const rowNum = i + 2; // Excel行号（从2开始，1是表头）
+      const rowNum = i + 2;
 
       try {
-        // 1. 数据验证和转换
-        const record = await this.validateAndTransform(row, rowNum);
+        // 1. 数据清洗
+        const cleaned = this.cleaningService.cleanRow(row, REPAYMENT_COLUMN_MAPPING);
         
-        // 2. 查找关联案件
-        const caseData = await this.findCaseByCustomerId(record.customerId);
-        if (!caseData) {
-          throw new Error(`未找到客户ID ${record.customerId} 对应的案件`);
+        // 2. 验证必填字段
+        if (!cleaned.customerId) {
+          throw new Error('客户ID不能为空');
+        }
+        if (!cleaned.repaymentAmount || cleaned.repaymentAmount <= 0) {
+          throw new Error('还款金额必须大于0');
+        }
+        if (!cleaned.repaymentDate) {
+          throw new Error('还款时间不能为空');
         }
 
-        // 3. 保存还款记录
-        await this.saveRepaymentRecord(caseData, record, operator);
+        // 3. 提取PIN码
+        const pinCode = this.extractPinCode(cleaned.customerId);
+        if (!pinCode) {
+          throw new Error(`无法从客户ID提取PIN码: ${cleaned.customerId}`);
+        }
+
+        // 4. 查找关联案件
+        const caseData = await this.caseRepo.findOne({
+          where: [
+            { pinCode },
+            { customerId: cleaned.customerId },
+          ],
+          order: { createdAt: 'DESC' },
+        });
+
+        if (!caseData) {
+          throw new Error(`未找到客户ID ${cleaned.customerId} 对应的案件`);
+        }
+
+        // 5. 判断还款类型
+        const repaymentType = this.determineRepaymentType(cleaned.repaymentMethod || '');
+
+        // 6. 保存还款记录
+        await this.saveRepaymentRecord(caseData, cleaned, repaymentType, operator);
 
         result.success++;
-        result.importedRecords.push(record);
-        
-        this.logger.log(`第${rowNum}行导入成功: ${record.customerId} 还款 ${record.repaymentAmount}元`);
+        this.logger.log(`第${rowNum}行导入成功: ${cleaned.customerId} 还款 ${cleaned.repaymentAmount}元`);
       } catch (error) {
         result.failed++;
         result.errors.push({
@@ -108,120 +124,31 @@ export class RepaymentImportService {
   }
 
   /**
-   * 验证并转换数据
+   * 提取PIN码
    */
-  private async validateAndTransform(row: any, rowNum: number): Promise<RepaymentRecord> {
-    // 字段映射（根据实际Excel列名）
-    const customerId = row['客户ID'] || row['客户Id'] || row['customerId'];
-    const repaymentAmount = parseFloat(row['还款金额（元）'] || row['还款金额'] || 0);
-    const couponAmount = parseFloat(row['还款券核销金额（元）'] || row['优惠券金额'] || 0);
-    const repaymentDateStr = row['还款时间'] || row['还款日期'];
-    const repaymentMethod = row['还款方式'] || '';
-    const collector = row['催收员'] || row['还款人员'] || '';
-    const collectionAgency = row['催收机构'] || row['结算机构'] || '';
-
-    // 验证必填字段
-    if (!customerId) {
-      throw new Error('客户ID不能为空');
-    }
-    if (!repaymentAmount || repaymentAmount <= 0) {
-      throw new Error('还款金额必须大于0');
-    }
-    if (!repaymentDateStr) {
-      throw new Error('还款时间不能为空');
+  private extractPinCode(customerId: string): string | null {
+    if (!customerId) return null;
+    
+    if (customerId.startsWith('jd_')) {
+      return customerId.substring(3);
     }
 
-    // 解析日期
-    let repaymentDate: Date;
-    try {
-      repaymentDate = new Date(repaymentDateStr);
-      if (isNaN(repaymentDate.getTime())) {
-        throw new Error('日期格式错误');
-      }
-    } catch {
-      throw new Error(`还款时间格式错误: ${repaymentDateStr}`);
-    }
-
-    // 判断还款类型（主动还款 vs 法院划扣）
-    const repaymentType = this.determineRepaymentType(repaymentMethod);
-
-    // 提取PIN码（从客户ID）
-    const pinCode = this.extractPinCode(customerId);
-
-    return {
-      pinCode,
-      customerId,
-      repaymentAmount,
-      couponAmount,
-      repaymentDate,
-      repaymentMethod,
-      repaymentType,
-      collector,
-      collectionAgency,
-    };
+    return customerId;
   }
 
   /**
    * 判断还款类型
-   * 根据客户需求：当事人主动还款 与 法院划扣 需要区分
    */
   private determineRepaymentType(repaymentMethod: string): 'voluntary' | 'court_deduction' {
     const method = String(repaymentMethod).toLowerCase().trim();
     
-    // 法院划扣关键词
     const courtKeywords = ['法院', '划扣', '扣划', '强制执行', '司法扣划'];
-    
-    // 主动还款关键词
-    const voluntaryKeywords = ['主动', '线下', '线上', '转账', '支付宝', '微信', '银行'];
     
     if (courtKeywords.some(k => method.includes(k))) {
       return 'court_deduction';
     }
     
-    // 默认认为是主动还款
     return 'voluntary';
-  }
-
-  /**
-   * 从客户ID提取PIN码
-   */
-  private extractPinCode(customerId: string): string | undefined {
-    if (!customerId) return undefined;
-    
-    // 如果客户ID格式是 jd_xxx，提取后面的部分
-    if (customerId.startsWith('jd_')) {
-      return customerId.substring(3);
-    }
-    
-    return customerId;
-  }
-
-  /**
-   * 根据客户ID查找案件
-   */
-  private async findCaseByCustomerId(customerId: string): Promise<Case | null> {
-    // 尝试多种匹配方式
-    const pinCode = this.extractPinCode(customerId);
-    
-    // 1. 先按PIN码查找
-    if (pinCode) {
-      const caseByPin = await this.caseRepo.findOne({
-        where: { pinCode },
-        order: { createdAt: 'DESC' },
-      });
-      if (caseByPin) return caseByPin;
-    }
-    
-    // 2. 按客户ID查找
-    const caseById = await this.caseRepo.findOne({
-      where: [
-        { customerId },
-        { pinCode: customerId },
-      ],
-      order: { createdAt: 'DESC' },
-    });
-    
-    return caseById;
   }
 
   /**
@@ -229,10 +156,11 @@ export class RepaymentImportService {
    */
   private async saveRepaymentRecord(
     caseData: Case,
-    record: RepaymentRecord,
+    record: any,
+    repaymentType: 'voluntary' | 'court_deduction',
     operator: string,
   ): Promise<void> {
-    // 创建还款分期记录
+    // 创建还款记录
     const installment = this.installmentRepo.create({
       case: caseData,
       caseId: caseData.id,
@@ -244,33 +172,30 @@ export class RepaymentImportService {
       status: 'paid',
       paidDate: record.repaymentDate,
       paidAmount: record.repaymentAmount,
-      // 扩展字段存储还款类型
-      repaymentType: record.repaymentType,
-      repaymentMethod: record.repaymentMethod,
-      collector: record.collector,
-      collectionAgency: record.collectionAgency,
     });
 
     await this.installmentRepo.save(installment);
 
-    // 更新案件金额信息
-    await this.updateCaseAmount(caseData, record);
+    // 更新案件金额
+    await this.updateCaseAmount(caseData, record.repaymentAmount, repaymentType);
   }
 
   /**
    * 获取下一期数
    */
   private async getNextPeriod(caseId: string): Promise<number> {
-    const count = await this.installmentRepo.count({
-      where: { caseId },
-    });
+    const count = await this.installmentRepo.count({ where: { caseId } });
     return count + 1;
   }
 
   /**
    * 更新案件金额
    */
-  private async updateCaseAmount(caseData: Case, record: RepaymentRecord): Promise<void> {
+  private async updateCaseAmount(
+    caseData: Case,
+    amount: number,
+    repaymentType: 'voluntary' | 'court_deduction',
+  ): Promise<void> {
     if (!caseData.amountInfo) {
       caseData.amountInfo = {
         originalClaim: 0,
@@ -284,23 +209,16 @@ export class RepaymentImportService {
       };
     }
 
-    // 累加还款总额
-    caseData.amountInfo.paidTotal += record.repaymentAmount;
+    caseData.amountInfo.paidTotal += amount;
     
-    // 区分还款类型
-    if (record.repaymentType === 'court_deduction') {
-      caseData.amountInfo.courtDeduction += record.repaymentAmount;
+    if (repaymentType === 'court_deduction') {
+      caseData.amountInfo.courtDeduction += amount;
     } else {
-      caseData.amountInfo.voluntaryRepayment += record.repaymentAmount;
+      caseData.amountInfo.voluntaryRepayment += amount;
     }
 
-    // 重新计算剩余金额
-    if (caseData.caseType === '民初') {
-      caseData.amountInfo.remainingClaim = 
-        caseData.amountInfo.originalClaim - caseData.amountInfo.paidTotal;
-    } else if (caseData.caseType === '执行') {
-      caseData.amountInfo.executionPaid = caseData.amountInfo.paidTotal;
-    }
+    caseData.amountInfo.remainingClaim = 
+      caseData.amountInfo.originalClaim - caseData.amountInfo.paidTotal;
 
     await this.caseRepo.save(caseData);
   }
@@ -311,14 +229,13 @@ export class RepaymentImportService {
   generateTemplate(): Buffer {
     const templateData = [
       {
-        '客户ID': 'jd_xxx 或 PIN码',
+        '客户ID': 'jd_xxx',
         '还款金额（元）': 1000,
         '还款券核销金额（元）': 0,
         '还款时间': '2025-03-07',
-        '还款方式': '线下还款/主动还款/法院划扣',
+        '还款方式': '线下还款',
         '催收员': '张三',
         '催收机构': '法催团队',
-        '备注': '可选填',
       },
     ];
 
@@ -330,13 +247,14 @@ export class RepaymentImportService {
   }
 
   /**
-   * 预览导入数据（不实际保存）
+   * 预览导入数据
    */
   async previewImport(fileBuffer: Buffer): Promise<{
     total: number;
     preview: Array<{
       row: number;
       customerId: string;
+      pinCode: string;
       repaymentAmount: number;
       repaymentDate: string;
       repaymentType: string;
@@ -348,27 +266,39 @@ export class RepaymentImportService {
 
     for (let i = 0; i < Math.min(rawData.length, 10); i++) {
       const row = rawData[i];
+      const rowNum = i + 2;
+
       try {
-        const record = await this.validateAndTransform(row, i + 2);
-        const exists = !!(await this.findCaseByCustomerId(record.customerId));
+        const cleaned = this.cleaningService.cleanRow(row, REPAYMENT_COLUMN_MAPPING);
+        
+        const pinCode = this.extractPinCode(cleaned.customerId);
+        const exists = pinCode ? !!(await this.caseRepo.findOne({
+          where: [
+            { pinCode },
+            { customerId: cleaned.customerId },
+          ],
+        })) : false;
+        
+        const repaymentType = this.determineRepaymentType(cleaned.repaymentMethod || '');
         
         preview.push({
-          row: i + 2,
-          customerId: record.customerId,
-          repaymentAmount: record.repaymentAmount,
-          repaymentDate: record.repaymentDate.toISOString().split('T')[0],
-          repaymentType: record.repaymentType === 'court_deduction' ? '法院划扣' : '主动还款',
+          row: rowNum,
+          customerId: cleaned.customerId || '未知',
+          pinCode: pinCode || '无法提取',
+          repaymentAmount: cleaned.repaymentAmount || 0,
+          repaymentDate: cleaned.repaymentDate ? cleaned.repaymentDate.toISOString().split('T')[0] : '',
+          repaymentType: repaymentType === 'court_deduction' ? '法院划扣' : '主动还款',
           exists,
         });
       } catch (error) {
         preview.push({
-          row: i + 2,
-          customerId: row['客户ID'] || '未知',
-          repaymentAmount: row['还款金额（元）'] || 0,
-          repaymentDate: row['还款时间'] || '',
+          row: rowNum,
+          customerId: '解析失败',
+          pinCode: '',
+          repaymentAmount: 0,
+          repaymentDate: '',
           repaymentType: '解析失败',
           exists: false,
-          error: error.message,
         });
       }
     }
